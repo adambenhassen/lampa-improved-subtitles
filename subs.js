@@ -4822,9 +4822,9 @@ var MatroskaSubtitles;
 
 (function() {
     "use strict";
-    var DEBUG = true;
+    var DEBUG = false;
     try {
-        DEBUG = localStorage.getItem("libass_debug") !== "0";
+        DEBUG = localStorage.getItem("libass_debug") === "1";
     } catch (e) {}
     function setDebug(on) {
         DEBUG = on;
