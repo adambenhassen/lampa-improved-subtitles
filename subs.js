@@ -6353,88 +6353,9 @@ var MatroskaSubtitles;
         clearTimeout(timer);
         timer = setTimeout(apply, 60);
     }
-    function addSettings() {
-        var A = Lampa.SettingsApi;
-        A.addComponent({
-            component: "subtitles_style",
-            name: "Subtitles",
-            icon: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' + '<rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/>' + '<rect x="5" y="14" width="6" height="2" rx="1" fill="currentColor"/>' + '<rect x="13" y="14" width="6" height="2" rx="1" fill="currentColor"/></svg>'
-        });
-        function param(name, values, def, label) {
-            A.addParam({
-                component: "subtitles_style",
-                param: {
-                    name: name,
-                    type: "select",
-                    values: values,
-                    default: def
-                },
-                field: {
-                    name: label
-                },
-                onChange: apply
-            });
-        }
-        param("subtitles_size", {
-            large: "120%",
-            normal: "100%",
-            small: "80%",
-            smaller: "70%",
-            tiny: "60%",
-            micro: "50%",
-            nano: "40%"
-        }, "normal", "Size");
-        param("subtitles_color", {
-            white: "White",
-            lightgray: "Light gray",
-            gray: "Gray",
-            yellow: "Yellow",
-            green: "Green",
-            cyan: "Cyan",
-            blue: "Blue",
-            magenta: "Magenta",
-            red: "Red",
-            black: "Black"
-        }, "white", "Text color");
-        param("subtitles_font", {
-            default: "Default",
-            typewriter: "Typewriter",
-            print: "Print",
-            console: "Console",
-            cursive: "Cursive",
-            casual: "Casual",
-            smallcaps: "Small caps"
-        }, "default", "Font");
-        param("subtitles_edge", {
-            default: "Default",
-            none: "None",
-            dropshadow: "Drop shadow",
-            raised: "Raised",
-            depressed: "Depressed",
-            uniform: "Uniform"
-        }, "default", "Edge / outline");
-        param("subtitles_weight", {
-            normal: "Normal",
-            bold: "Bold"
-        }, "normal", "Weight");
-        param("subtitles_bg", {
-            none: "None",
-            black: "Black",
-            gray: "Gray",
-            lightgray: "Light gray",
-            white: "White",
-            yellow: "Yellow",
-            green: "Green",
-            cyan: "Cyan",
-            blue: "Blue",
-            magenta: "Magenta",
-            red: "Red"
-        }, "none", "Background");
-    }
     function patch() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return setTimeout(patch, 100);
         injectCss();
-        addSettings();
         Lampa.Storage.listener.follow("change", function(e) {
             if (e.name && e.name.indexOf("subtitles_") === 0) schedule();
         });
