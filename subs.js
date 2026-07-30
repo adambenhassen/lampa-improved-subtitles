@@ -4822,7 +4822,7 @@ var MatroskaSubtitles;
 
 (function() {
     "use strict";
-    var LIBASS_SUBS_VERSION = "1.0.4";
+    var LIBASS_SUBS_VERSION = "1.0.5";
     var DEBUG = false;
     try {
         DEBUG = localStorage.getItem("libass_debug") === "1";
@@ -5071,12 +5071,13 @@ var MatroskaSubtitles;
         }
     }
     function getRange(s, e) {
-        var g = gen, url = streamUrl;
+        var g = gen, url = streamUrl, timedOut = false;
         var ac = newAborter();
         if (ac && aborter) aborter.signal.addEventListener("abort", function() {
             ac.abort();
         });
         var tm = ac ? setTimeout(function() {
+            timedOut = true;
             ac.abort();
         }, 3e4) : 0;
         return fetch(url, {
@@ -5101,7 +5102,7 @@ var MatroskaSubtitles;
             return r.arrayBuffer();
         }, function(err) {
             clearTimeout(tm);
-            throw err;
+            throw timedOut ? new Error("stalled 30s") : err;
         }).then(function(ab) {
             return new Uint8Array(ab);
         });
@@ -5298,8 +5299,12 @@ var MatroskaSubtitles;
             pick.fetched = true;
             getRange(pick.off, pick.off + pick.size - 1).then(function(b) {
                 if (g !== gen) return;
-                parseMovTextChunk(pick, b);
                 mp4Fetching--;
+                try {
+                    parseMovTextChunk(pick, b);
+                } catch (e2) {
+                    hud("mp4 chunk parse err: " + e2.message);
+                }
             }).catch(function(e) {
                 if (g !== gen) return;
                 mp4Fetching--;
@@ -5319,16 +5324,16 @@ var MatroskaSubtitles;
             hud(msg);
             if (++initFails < 3) curSrc = null; else hud("init failed 3x — giving up on this src");
         }
-        function useMoov(off, size) {
+        function useMoov(off, size, hdr) {
             if (g !== gen) return;
             if (off < 0) return hud("mp4: moov not found" + (fileSize ? "" : " (file size unknown)"));
             if (!isFinite(size) || size < 16 || off + size > fileSize || size > 64 * 1048576) return hud("mp4: moov bounds bad len=" + size);
             if (off + size <= hb.length) {
-                parseMoov(hb.subarray(off + 8, off + size));
+                parseMoov(hb.subarray(off + hdr, off + size));
                 return;
             }
             hud("mp4 moov @" + (off / 1048576).toFixed(0) + "MB len=" + (size / 1048576).toFixed(1) + "MB");
-            getRange(off + 8, off + size - 1).then(function(b) {
+            getRange(off + hdr, off + size - 1).then(function(b) {
                 if (g === gen) parseMoov(b);
             }).catch(function(e) {
                 fail("mp4 moov err: " + e.message, e);
@@ -5336,15 +5341,18 @@ var MatroskaSubtitles;
         }
         function step(off) {
             if (g !== gen) return;
-            if (off + 8 > fileSize) return useMoov(-1, 0);
+            if (off + 8 > fileSize) return useMoov(-1, 0, 8);
             var hdrReady = off + 16 <= hb.length ? Promise.resolve(hb.subarray(off, off + 16)) : getRange(off, off + 15);
             hdrReady.then(function(b) {
                 if (g !== gen) return;
-                var size = u32(b, 0), type = box4(b, 4);
-                if (size === 1) size = u64(b, 8);
+                var size = u32(b, 0), type = box4(b, 4), hdr = 8;
+                if (size === 1) {
+                    size = u64(b, 8);
+                    hdr = 16;
+                }
                 if (size === 0) size = fileSize - off;
-                if (type === "moov") return useMoov(off, size);
-                if (size < 8) return useMoov(-1, 0);
+                if (type === "moov") return useMoov(off, size, hdr);
+                if (size < 8) return useMoov(-1, 0, 8);
                 step(off + size);
             }).catch(function(e) {
                 fail("mp4 walk err: " + e.message, e);
@@ -5374,10 +5382,15 @@ var MatroskaSubtitles;
     }
     var subBox = null, timeLoop = null;
     var lastTime = 0, srcLogged = false, hbCount = 0;
+    var vtAlive = false;
     function curTime() {
         var v = video();
         var vt = v && v.currentTime;
-        return typeof vt === "number" && vt > 0 ? vt : lastTime;
+        if (typeof vt === "number" && vt > 0) {
+            vtAlive = true;
+            return vt;
+        }
+        return vtAlive && vt === 0 ? 0 : lastTime;
     }
     function ensureBox() {
         if (subBox && subBox.parentNode) return subBox;
@@ -5613,7 +5626,7 @@ var MatroskaSubtitles;
                 hud("time src: " + (video() && video().currentTime > 0 ? "video" : "Lampa") + " t=" + t.toFixed(1));
                 srcLogged = true;
             }
-            if (++hbCount % 15 === 0) hud("t=" + t.toFixed(1) + " cues=" + (tracks[curTrack] ? tracks[curTrack].cues.length : 0));
+            if (DEBUG && ++hbCount % 15 === 0) hud("t=" + t.toFixed(1) + " cues=" + (tracks[curTrack] ? tracks[curTrack].cues.length : 0));
         }, 200);
     }
     var FALLBACK_HEADER = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BackColour,Bold,Italic,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,Arial,54,&H00FFFFFF,&H00000000,&H00000000,0,0,1,2.5,1,2,40,40,40,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n";
@@ -5685,6 +5698,7 @@ var MatroskaSubtitles;
         renderTrack(v, best);
     }
     function scheduleUpdate(v) {
+        if (typeof document === "undefined") return;
         clearTimeout(updTimer);
         updTimer = setTimeout(function() {
             autoPick(v);
@@ -6147,7 +6161,7 @@ var MatroskaSubtitles;
         regAborter = newAborter();
         var g = gen;
         var end = Math.min(fileSize - 1, startByte + regionBytes());
-        var lastProg = Date.now();
+        var lastProg = Date.now(), stalled = false;
         var wd = setInterval(function() {
             if (g !== gen || !fetching) {
                 clearInterval(wd);
@@ -6155,6 +6169,7 @@ var MatroskaSubtitles;
             }
             if (Date.now() - lastProg > 3e4) {
                 clearInterval(wd);
+                stalled = true;
                 hud("region stalled 30s — aborting");
                 try {
                     if (regAborter) regAborter.abort();
@@ -6244,10 +6259,10 @@ var MatroskaSubtitles;
             clearInterval(wd);
             if (g !== gen) return;
             fetching = false;
-            if (!(e && e.name === "AbortError")) {
+            if (stalled || !(e && e.name === "AbortError")) {
                 regFails++;
                 regBackoffUntil = Date.now() + Math.min(6e4, 1e3 * Math.pow(2, regFails));
-                hud("region fetch err: " + e.message + " (backoff " + Math.round((regBackoffUntil - Date.now()) / 1e3) + "s)");
+                hud("region fetch err: " + (stalled ? "stalled 30s" : e.message) + " (backoff " + Math.round((regBackoffUntil - Date.now()) / 1e3) + "s)");
             }
         });
     }
@@ -6340,25 +6355,11 @@ var MatroskaSubtitles;
             });
             return sizeReady.then(function() {
                 hud("size=" + (fileSize / 1048576).toFixed(0) + "MB status=" + httpStatus + " range=" + (httpStatus === 206 ? "ok" : "NO"));
-                return fetch(url, {
-                    headers: {
-                        Range: "bytes=0-2097151"
-                    },
-                    signal: aborter.signal
-                });
+                return getRange(0, 2097151);
             });
-        }).then(function(res) {
-            if (res.status !== 206) {
-                try {
-                    res.body.cancel();
-                } catch (e) {}
-                throw new Error("range not honored (http " + res.status + ")");
-            }
-            return res.arrayBuffer();
-        }).then(function(ab) {
-            if (g !== gen) return;
+        }).then(function(hb) {
+            if (g !== gen || !hb) return;
             initFails = 0;
-            var hb = new Uint8Array(ab);
             if (box4(hb, 4) === "ftyp") return mp4Init(hb);
             var te = findTracksEnd(hb);
             hud("tracksEnd=" + te);
@@ -6371,25 +6372,13 @@ var MatroskaSubtitles;
             var cuesPos = parseSeekHead(hb);
             if (cuesPos >= 0) {
                 var cs = segBase + cuesPos, ce = Math.min(fileSize - 1, cs + 1048575);
-                fetch(url, {
-                    headers: {
-                        Range: "bytes=" + cs + "-" + ce
-                    },
-                    signal: aborter.signal
-                }).then(function(r) {
-                    if (r.status !== 206) {
-                        try {
-                            r.body.cancel();
-                        } catch (e) {}
-                        throw new Error("http " + r.status);
-                    }
-                    return r.arrayBuffer();
-                }).then(function(cab) {
+                getRange(cs, ce).then(function(cb) {
                     if (g !== gen) return;
-                    cueIndex = parseCuesIndex(new Uint8Array(cab));
+                    cueIndex = parseCuesIndex(cb);
                     hud("cues idx: " + (cueIndex ? cueIndex.length + " points" : "PARSE FAIL"));
                     ensureRegionForTime(curTime());
                 }).catch(function(e) {
+                    if (g !== gen || e && e.name === "AbortError") return;
                     hud("cues idx err: " + e.message);
                 });
             } else hud("no Cues in SeekHead (estimate mode)");
@@ -6444,9 +6433,11 @@ var MatroskaSubtitles;
         regFails = 0;
         regBackoffUntil = 0;
         noDurWarned = false;
+        walkBailed = false;
         srcLogged = false;
         hbCount = 0;
         samples = [];
+        vtAlive = false;
     }
     var waited = false;
     function tick() {
@@ -6643,7 +6634,7 @@ var MatroskaSubtitles;
         timer = setTimeout(apply, 60);
     }
     function patch() {
-        if (!window.Lampa || !Lampa.Storage) return setTimeout(patch, 100);
+        if (!window.Lampa || !Lampa.Storage || !Lampa.Storage.listener) return setTimeout(patch, 100);
         injectCss();
         Lampa.Storage.listener.follow("change", function(e) {
             if (e.name && e.name.indexOf("subtitles_") === 0) schedule();
