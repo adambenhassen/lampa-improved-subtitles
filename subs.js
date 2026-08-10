@@ -5676,6 +5676,10 @@ var MatroskaSubtitles;
                 var saved = parseInt(localStorage.getItem(trackKey()), 10);
                 var saved2 = parseInt(localStorage.getItem(trackKey() + "_2"), 10);
                 if (saved2 >= 0 && tracks[saved2] && curTrack2 < 0) curTrack2 = saved2;
+                if (saved === -1) {
+                    manual = true;
+                    return;
+                }
                 if (saved >= 0 && tracks[saved]) {
                     manual = true;
                     renderTrack(v, saved);
@@ -5998,7 +6002,7 @@ var MatroskaSubtitles;
                         subBox.__last = "";
                     }
                     try {
-                        localStorage.removeItem(trackKey());
+                        localStorage.setItem(trackKey(), -1);
                     } catch (e) {}
                     hud("subs OFF");
                 } else {
