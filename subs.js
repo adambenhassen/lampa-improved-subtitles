@@ -6152,6 +6152,16 @@ var MatroskaSubtitles;
             } else i++;
         }
     }
+    var contParser = null, contEnd = -1;
+    function dropRegionParser() {
+        if (contParser) {
+            try {
+                contParser.end();
+            } catch (e) {}
+            contParser = null;
+        }
+        contEnd = -1;
+    }
     function fetchRegion(startByte) {
         if (fetching || !headerBytes || !streamUrl) return;
         if (Date.now() < regBackoffUntil) return;
@@ -6188,12 +6198,20 @@ var MatroskaSubtitles;
                 } catch (e) {}
                 throw new Error("http " + res.status);
             }
+            // Regions are cut on byte offsets, not cluster boundaries. When this one
+            // continues straight on from the last, keep its parser alive: starting a
+            // fresh one resyncs to the *next* cluster and silently drops every subtitle
+            // left in the cluster straddling the seam.
+            var cont = !!contParser && startByte === contEnd;
+            if (!cont) dropRegionParser();
             var reader = res.body.getReader();
-            var parser = null, pre = new Uint8Array(0), got = 0, ci = -1, perrLogged = false;
+            var parser = cont ? contParser : null, pre = new Uint8Array(0), got = 0, ci = cont ? 0 : -1, perrLogged = false;
             function finish() {
                 clearInterval(wd);
                 if (g !== gen) return;
                 regFails = 0;
+                contParser = parser;
+                contEnd = parser ? startByte + got : -1;
                 fetchedRegions.push({
                     s: startByte,
                     e: startByte + got
@@ -6213,11 +6231,6 @@ var MatroskaSubtitles;
                         return;
                     }
                     if (r.done) {
-                        try {
-                            if (parser) parser.end();
-                        } catch (e) {
-                            hud("region parse err (end): " + e.message);
-                        }
                         finish();
                         return;
                     }
@@ -6259,6 +6272,7 @@ var MatroskaSubtitles;
             clearInterval(wd);
             if (g !== gen) return;
             fetching = false;
+            dropRegionParser();
             if (stalled || !(e && e.name === "AbortError")) {
                 regFails++;
                 regBackoffUntil = Date.now() + Math.min(6e4, 1e3 * Math.pow(2, regFails));
@@ -6403,6 +6417,7 @@ var MatroskaSubtitles;
             } catch (e) {}
             regAborter = null;
         }
+        dropRegionParser();
         if (timeLoop) {
             clearInterval(timeLoop);
             timeLoop = null;
