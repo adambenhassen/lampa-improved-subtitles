@@ -16,14 +16,14 @@ This plugin bypasses that entirely: subtitles are extracted from the stream and 
 
 ## Features
 
-- 🎬 **MKV**: SRT/ASS tracks via seek-index extraction. Reads only stream regions near the playhead, handles multi-GB 4K remuxes
+- 🎬 **MKV**: SRT/ASS tracks via seek-index extraction. Reads only stream regions near the playhead, handles multi-GB files
 - 📦 **MP4**: mov_text/tx3g tracks via a moov sample-table parser. Fetches *only* subtitle bytes, near-zero bandwidth
 - 🌍 **Dual subtitles**: two tracks simultaneously (watch with mixed-language viewers), each styled independently
 - 🎨 **Per-track styling**: size, 21 colors, edge/outline, font, weight, background, top/bottom anchor, vertical position
 - ⏱️ **Time shift**: ±10 s per track
 - 💾 **Remembers your choice**: track selection persisted per stream, sensible auto-pick otherwise
 - ⚡ **Seek-friendly**: subs appear within ~1 s after jumping anywhere in the file
-- 🔧 **Tunable**: region size (RAM) and lookahead (bandwidth) knobs for weaker TVs
+- 🔧 **Tunable**: region size (auto-sized to the stream's bitrate) and lookahead knobs for slow or flaky sources
 
 ## Screenshots
 
@@ -72,12 +72,12 @@ Restart Lampa after adding. No rebuild, no server-side changes. Works with any H
 | Track list | Which embedded track renders (choice saved per stream) |
 | Second subtitle… | Optional second track + its own settings |
 | Settings | Size, color, edge, font, weight, anchor, position, time shift, background |
-| Settings → Region size / Lookahead | RAM vs. subtitle-readiness trade-off |
+| Settings → Region size / Lookahead | Request granularity vs. subtitle-readiness trade-off |
 | Settings → Debug panels | On-screen extraction diagnostics |
 
 ## How it works
 
-- **MKV**: parses the header + Cues seek index, then streams ~12 MB cluster regions around the playhead through a bundled [matroska-subtitles](https://github.com/mathiasvr/matroska-subtitles) demuxer. Exact time-to-byte mapping, no full-file download.
+- **MKV**: parses the header + Cues seek index, then streams cluster regions (~6 s of the stream each, auto-sized to the bitrate) around the playhead through a bundled [matroska-subtitles](https://github.com/mathiasvr/matroska-subtitles) demuxer. Exact time-to-byte mapping, no full-file download.
 - **MP4**: walks the `moov` box, reads the subtitle tracks' sample tables (`stts`/`stsz`/`stsc`/`stco`), then issues tiny ranged GETs for just the subtitle samples ahead of the playhead.
 - Rendering is a positioned DOM overlay above the native `<video>` plane. Survives hardware-accelerated playback where canvas approaches fail.
 
@@ -95,7 +95,7 @@ Requires the stream host to support HTTP Range requests.
 
 - **No tracks listed**: the file may have only bitmap (PGS) subs, or the host ignores Range requests. Enable *Debug panels* to see extraction status.
 - **Subs lag right after a far seek**: the stream data hasn't arrived yet; they catch up with the video buffer.
-- **App restarts on low-RAM TVs**: lower *Region size* in Settings.
+- **Subs drop out on a slow source**: enable *Debug panels*; if `got` stays below `need` the source can't feed both video and subtitle scan — a larger *Region size* trims per-request overhead, a smaller one is gentler on the server.
 
 ## License
 

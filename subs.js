@@ -4850,9 +4850,23 @@ var MatroskaSubtitles;
     };
     var aborter = null, curSrc = null, updTimer = null;
     var gen = 0;
+    // Bytes the file consumes in s seconds of playback (0 when the rate is unknown).
+    function secBytes(s) {
+        return duration && fileSize ? s * fileSize / duration : 0;
+    }
+    // Range-request granularity. Auto = ~6s of the stream (clamped 4–16MB) so a high-
+    // and a low-bitrate file overshoot the lookahead and load the server alike;
+    // below ~4MB per-request latency eats the bandwidth margin. A fixed size from
+    // settings overrides.
     function regionBytes() {
         var mb = window.Lampa && Lampa.Storage ? parseInt(Lampa.Storage.field("libass_region"), 10) : 0;
-        return (mb >= 2 && mb <= 24 ? mb : 12) * 1048576;
+        if (mb >= 2 && mb <= 24) return mb * 1048576;
+        var auto = secBytes(6);
+        return auto ? Math.min(16 * 1048576, Math.max(4 * 1048576, Math.round(auto))) : 12 * 1048576;
+    }
+    // How far behind the playhead the scan may fall before it gives up and jumps.
+    function driftBytes() {
+        return secBytes(10) || 2 * regionBytes();
     }
     function lookaheadSec() {
         var s = window.Lampa && Lampa.Storage ? parseInt(Lampa.Storage.field("libass_lookahead"), 10) : 0;
@@ -5864,18 +5878,19 @@ var MatroskaSubtitles;
             opt("Time shift", "shift", SHIFTS, "0s (off)");
             opt("Background", "bg", BGS, "None");
             if (p === "libass") {
-                opt("Region size (RAM)", "region", {
-                    2: "2 MB (min RAM)",
+                opt("Region size", "region", {
+                    auto: "Auto (~6s of stream, default)",
+                    2: "2 MB",
                     4: "4 MB",
-                    6: "6 MB (low RAM)",
+                    6: "6 MB",
                     8: "8 MB",
                     10: "10 MB",
-                    12: "12 MB (default)",
+                    12: "12 MB",
                     16: "16 MB",
                     18: "18 MB",
                     20: "20 MB",
-                    24: "24 MB (risky)"
-                }, "12 MB (default)");
+                    24: "24 MB"
+                }, "Auto (~6s of stream, default)");
                 opt("Lookahead", "lookahead", {
                     10: "10s",
                     20: "20s (default)",
@@ -6155,7 +6170,7 @@ var MatroskaSubtitles;
         }
         if (!announced) hud("header parsed but no tracks event (truncated header?)");
     }
-    var regAborter = null, curFetchStart = -1;
+    var regAborter = null, curFetchStart = -1, curFetchGot = 0;
     var regFails = 0, regBackoffUntil = 0;
     var noDurWarned = false;
     function mergeRegions() {
@@ -6195,6 +6210,7 @@ var MatroskaSubtitles;
         }
         fetching = true;
         curFetchStart = startByte;
+        curFetchGot = 0;
         regAborter = newAborter();
         var g = gen;
         var end = Math.min(fileSize - 1, startByte + regionBytes());
@@ -6268,6 +6284,7 @@ var MatroskaSubtitles;
                     }
                     var chunk = r.value;
                     got += chunk.length;
+                    curFetchGot = from - startByte + got;
                     // Track the last cluster start. A start split across chunks is
                     // caught by re-checking the previous chunk's tail joined to this head.
                     var k = lastClusterStart(chunk), join = null;
@@ -6376,8 +6393,8 @@ var MatroskaSubtitles;
         // continue it rather than jump. A jump skips [chainEnd, target), and lines due
         // now sit there — muxers place subtitle blocks a second or two ahead of their
         // start time. A larger backlog still jumps, or everything after it runs late.
-        var slack = duration ? 3 * fileSize / duration : regionBytes() / 4, behind = null;
-        var span = Math.max(slack, 2 * regionBytes());
+        var slack = secBytes(3) || regionBytes() / 4, behind = null;
+        var span = Math.max(slack, driftBytes());
         if (!inside) for (var k = 0; k < fetchedRegions.length; k++) if (target >= fetchedRegions[k].e && target - fetchedRegions[k].e <= span && (!behind || fetchedRegions[k].e > behind.e)) behind = fetchedRegions[k];
         if (behind && !fetching && behind.e < fileSize - 1) {
             if (target - behind.e <= slack) {
@@ -6387,8 +6404,10 @@ var MatroskaSubtitles;
             if (Date.now() >= regBackoffUntil) hud("behind " + ((target - behind.e) / 1048576).toFixed(1) + "MB — jump to @" + (target / 1048576).toFixed(0) + "MB");
         }
         if (fetching) {
-            if (regAborter && Math.abs(target - curFetchStart) > 2 * regionBytes()) {
-                hud("drift " + ((target - curFetchStart) / 1048576).toFixed(0) + "MB — abort region @" + (curFetchStart / 1048576).toFixed(0) + "MB");
+            // Behind = playhead past the fetch frontier; ahead = playhead before the region.
+            var frontier = curFetchStart + Math.max(0, curFetchGot);
+            if (regAborter && (target - frontier > driftBytes() || !inside && curFetchStart - target > driftBytes())) {
+                hud("drift " + ((target - frontier) / 1048576).toFixed(0) + "MB — abort region @" + (curFetchStart / 1048576).toFixed(0) + "MB");
                 try {
                     regAborter.abort();
                 } catch (e) {}
@@ -6547,10 +6566,10 @@ var MatroskaSubtitles;
         curSrc = src;
         hud("video src: " + src);
         var same = src.indexOf(location.origin) === 0;
-        var looksTorrent = /\/(ts|stream)\//i.test(src) || /link=/i.test(src);
+        var looksStream = /\/(ts|stream)\//i.test(src) || /link=/i.test(src);
         var youtube = /youtube|googlevideo|\.m3u8.*yt/i.test(src);
         if (youtube) return hud("skip: youtube");
-        if (!same && !looksTorrent) return hud("skip: not same-origin/torrent (adjust filter)");
+        if (!same && !looksStream) return hud("skip: not same-origin/stream URL (adjust filter)");
         extract(v, src);
     }
     function patch() {
