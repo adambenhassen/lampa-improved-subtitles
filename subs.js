@@ -6333,9 +6333,20 @@ var MatroskaSubtitles;
         if (!duration) return -1;
         return Math.max(0, Math.floor(t / duration * fileSize) - 2 * 1024 * 1024);
     }
+    // Upper bound for the data of time t: the first cue point past t (cue points sit
+    // at cluster starts, so the one before t can lag the real playhead by a keyframe
+    // interval plus a cluster — enough to swallow the whole lookahead), or EOF.
+    function byteAfterTime(t) {
+        if (cueIndex) {
+            for (var j = 0; j < cueIndex.length; j++) if (cueIndex[j].time > t) return cueIndex[j].byte;
+            return fileSize;
+        }
+        if (!duration) return -1;
+        return Math.min(fileSize, Math.floor(t / duration * fileSize) + 2 * 1024 * 1024);
+    }
     function ensureAhead(t) {
         if (!fileSize || fetching) return;
-        var bNow = byteForTime(t), bAhead = byteForTime(t + lookaheadSec());
+        var bNow = byteForTime(t), bAhead = byteAfterTime(t + lookaheadSec());
         if (bNow < 0) return;
         for (var i = 0; i < fetchedRegions.length; i++) {
             var r = fetchedRegions[i];
@@ -6356,8 +6367,25 @@ var MatroskaSubtitles;
             return;
         }
         target = Math.min(fileSize - 1, target);
-        var margin = Math.min(4 * 1024 * 1024, regionBytes() / 2);
-        for (var i = 0; i < fetchedRegions.length; i++) if (target >= fetchedRegions[i].s && target < fetchedRegions[i].e - margin) return;
+        var margin = Math.min(4 * 1024 * 1024, regionBytes() / 2), inside = false;
+        for (var i = 0; i < fetchedRegions.length; i++) if (target >= fetchedRegions[i].s && target < fetchedRegions[i].e) {
+            if (target < fetchedRegions[i].e - margin) return;
+            inside = true;
+        }
+        // Chain end only a few seconds behind the playhead (slow fetch, stall, backoff):
+        // continue it rather than jump. A jump skips [chainEnd, target), and lines due
+        // now sit there — muxers place subtitle blocks a second or two ahead of their
+        // start time. A larger backlog still jumps, or everything after it runs late.
+        var slack = duration ? 3 * fileSize / duration : regionBytes() / 4, behind = null;
+        var span = Math.max(slack, 2 * regionBytes());
+        if (!inside) for (var k = 0; k < fetchedRegions.length; k++) if (target >= fetchedRegions[k].e && target - fetchedRegions[k].e <= span && (!behind || fetchedRegions[k].e > behind.e)) behind = fetchedRegions[k];
+        if (behind && !fetching && behind.e < fileSize - 1) {
+            if (target - behind.e <= slack) {
+                fetchRegion(behind.e);
+                return;
+            }
+            if (Date.now() >= regBackoffUntil) hud("behind " + ((target - behind.e) / 1048576).toFixed(1) + "MB — jump to @" + (target / 1048576).toFixed(0) + "MB");
+        }
         if (fetching) {
             if (regAborter && Math.abs(target - curFetchStart) > 2 * regionBytes()) {
                 hud("drift " + ((target - curFetchStart) / 1048576).toFixed(0) + "MB — abort region @" + (curFetchStart / 1048576).toFixed(0) + "MB");
