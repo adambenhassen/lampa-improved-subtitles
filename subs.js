@@ -4906,6 +4906,19 @@ var MatroskaSubtitles;
         for (var i = from || 0; i < buf.length - 4; i++) if (buf[i] === CLUSTER_ID[0] && buf[i + 1] === CLUSTER_ID[1] && buf[i + 2] === CLUSTER_ID[2] && buf[i + 3] === CLUSTER_ID[3]) return i;
         return -1;
     }
+    // Last Cluster start in buf, validated as ID + size vint + Timecode (0xE7), or
+    // ffmpeg's CRC-32 (0xBF, 4 bytes) then Timecode, so video bytes that happen to
+    // spell the ID don't count. Needs 20 bytes of slack after the ID.
+    function lastClusterStart(buf) {
+        for (var i = buf.length - 21; i >= 0; i--) {
+            if (buf[i] !== CLUSTER_ID[0] || buf[i + 1] !== CLUSTER_ID[1] || buf[i + 2] !== CLUSTER_ID[2] || buf[i + 3] !== CLUSTER_ID[3]) continue;
+            var l = vintLen(buf[i + 4]);
+            if (l > 8) continue;
+            var c = i + 4 + l;
+            if (buf[c] === 231 || buf[c] === 191 && buf[c + 1] === 132 && buf[c + 6] === 231) return i;
+        }
+        return -1;
+    }
     function readFloat(buf, pos, len) {
         var dv = new DataView(buf.buffer, buf.byteOffset + pos, len);
         return len === 4 ? dv.getFloat32(0) : dv.getFloat64(0);
@@ -6152,6 +6165,7 @@ var MatroskaSubtitles;
         for (var i = 0; i < fetchedRegions.length - 1; ) {
             if (fetchedRegions[i + 1].s <= fetchedRegions[i].e) {
                 fetchedRegions[i].e = Math.max(fetchedRegions[i].e, fetchedRegions[i + 1].e);
+                fetchedRegions[i].lc = Math.max(fetchedRegions[i].lc || -1, fetchedRegions[i + 1].lc || -1);
                 fetchedRegions.splice(i + 1, 1);
             } else i++;
         }
@@ -6170,12 +6184,21 @@ var MatroskaSubtitles;
         if (fetching || !headerBytes || !streamUrl) return;
         if (Date.now() < regBackoffUntil) return;
         for (var i = 0; i < fetchedRegions.length; i++) if (startByte >= fetchedRegions[i].s && startByte < fetchedRegions[i].e) return;
+        // A fresh parser resyncs forward to the next Cluster, so extending a region
+        // without the parser that read it drops the cluster straddling the seam
+        // (seek back into old ground, aborted or failed fetch). Rewind the request to
+        // the last cluster start seen in that region so the seam cluster is re-read whole.
+        var from = startByte;
+        if (!(contParser && startByte === contEnd)) for (var j = 0; j < fetchedRegions.length; j++) if (fetchedRegions[j].e === startByte && fetchedRegions[j].lc > 0) {
+            from = fetchedRegions[j].lc;
+            break;
+        }
         fetching = true;
         curFetchStart = startByte;
         regAborter = newAborter();
         var g = gen;
         var end = Math.min(fileSize - 1, startByte + regionBytes());
-        var lastProg = Date.now(), stalled = false;
+        var lastProg = Date.now(), stalled = false, t0 = Date.now();
         var wd = setInterval(function() {
             if (g !== gen || !fetching) {
                 clearInterval(wd);
@@ -6192,7 +6215,7 @@ var MatroskaSubtitles;
         }, 5e3);
         fetch(streamUrl, {
             headers: {
-                Range: "bytes=" + startByte + "-" + end
+                Range: "bytes=" + from + "-" + end
             },
             signal: regAborter && regAborter.signal
         }).then(function(res) {
@@ -6206,22 +6229,27 @@ var MatroskaSubtitles;
             // continues straight on from the last, keep its parser alive: starting a
             // fresh one resyncs to the *next* cluster and silently drops every subtitle
             // left in the cluster straddling the seam.
-            var cont = !!contParser && startByte === contEnd;
+            var cont = !!contParser && from === contEnd;
             if (!cont) dropRegionParser();
             var reader = res.body.getReader();
             var parser = cont ? contParser : null, pre = new Uint8Array(0), got = 0, ci = cont ? 0 : -1, perrLogged = false;
+            var lc = -1, tail = new Uint8Array(0);
             function finish() {
                 clearInterval(wd);
                 if (g !== gen) return;
                 regFails = 0;
                 contParser = parser;
-                contEnd = parser ? startByte + got : -1;
+                contEnd = parser ? from + got : -1;
                 fetchedRegions.push({
-                    s: startByte,
-                    e: startByte + got
+                    s: from,
+                    e: from + got,
+                    lc: lc
                 });
                 mergeRegions();
-                hud("region @" + (startByte / 1048576).toFixed(0) + "MB len=" + (got / 1048576).toFixed(0) + "MB cluster=" + ci);
+                // Throughput vs. the file's own byte rate: this scan has to keep up with
+                // playback byte-for-byte, so got/s below need/s means guaranteed gaps.
+                var secs = Math.max(.1, (Date.now() - t0) / 1e3);
+                hud("region @" + (startByte / 1048576).toFixed(0) + "MB len=" + (got / 1048576).toFixed(0) + "MB cluster=" + ci + (from < startByte ? " rewind=" + ((startByte - from) / 1048576).toFixed(1) + "MB" : "") + " " + secs.toFixed(0) + "s got=" + (got / 1048576 / secs).toFixed(2) + "MB/s need=" + (duration ? (fileSize / duration / 1048576).toFixed(2) : "?"));
                 fetching = false;
                 ensureRegionForTime(curTime());
             }
@@ -6240,6 +6268,18 @@ var MatroskaSubtitles;
                     }
                     var chunk = r.value;
                     got += chunk.length;
+                    // Track the last cluster start. A start split across chunks is
+                    // caught by re-checking the previous chunk's tail joined to this head.
+                    var k = lastClusterStart(chunk), join = null;
+                    if (k >= 0) lc = from + got - chunk.length + k;
+                    if (tail.length) {
+                        join = new Uint8Array(tail.length + Math.min(20, chunk.length));
+                        join.set(tail);
+                        join.set(chunk.subarray(0, join.length - tail.length), tail.length);
+                        if (k < 0 && (k = lastClusterStart(join)) >= 0) lc = from + got - chunk.length - tail.length + k;
+                    }
+                    // Rolling tail: chunks can be tiny, so carry bytes across several of them.
+                    tail = chunk.length >= 20 ? chunk.subarray(chunk.length - 20) : (join || chunk).subarray(Math.max(0, (join || chunk).length - 20));
                     if (!parser) {
                         var buf = new Uint8Array(pre.length + chunk.length);
                         buf.set(pre);
@@ -6320,6 +6360,7 @@ var MatroskaSubtitles;
         for (var i = 0; i < fetchedRegions.length; i++) if (target >= fetchedRegions[i].s && target < fetchedRegions[i].e - margin) return;
         if (fetching) {
             if (regAborter && Math.abs(target - curFetchStart) > 2 * regionBytes()) {
+                hud("drift " + ((target - curFetchStart) / 1048576).toFixed(0) + "MB — abort region @" + (curFetchStart / 1048576).toFixed(0) + "MB");
                 try {
                     regAborter.abort();
                 } catch (e) {}
