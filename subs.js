@@ -6548,7 +6548,9 @@ var MatroskaSubtitles;
     }
     var waited = false;
     function tick() {
-        if (streamUrl) hookSubsButton();
+        // take the subs button only once the stream is readable (first range fetch
+        // succeeded); a host that refuses us keeps Lampa's own subtitle menu
+        if (streamUrl && fileSize) hookSubsButton();
         var v = video();
         var src = v && (v.src || v.currentSrc);
         if (!v || !src) {
@@ -6567,9 +6569,13 @@ var MatroskaSubtitles;
         hud("video src: " + src);
         var same = src.indexOf(location.origin) === 0;
         var looksStream = /\/(ts|stream)\//i.test(src) || /link=/i.test(src);
+        // anything that is not adaptive (HLS/DASH) may be a container file — online
+        // sources hand out direct links, often signed and without an extension; the
+        // first range fetch decides, and a host that refuses leaves the player alone
+        var adaptive = /\.(m3u8|mpd)(\?|#|$)/i.test(src) || /^(blob|data):/i.test(src);
         var youtube = /youtube|googlevideo|\.m3u8.*yt/i.test(src);
         if (youtube) return hud("skip: youtube");
-        if (!same && !looksStream) return hud("skip: not same-origin/stream URL (adjust filter)");
+        if (adaptive && !same && !looksStream) return hud("skip: adaptive stream");
         extract(v, src);
     }
     function patch() {
@@ -6579,7 +6585,7 @@ var MatroskaSubtitles;
             var origShow = Lampa.Select.show;
             Lampa.Select.__libass = true;
             Lampa.Select.show = function(params) {
-                var subsTitle = streamUrl && Lampa.Lang ? Lampa.Lang.translate("settings_player_subs") : null;
+                var subsTitle = streamUrl && fileSize && Lampa.Lang ? Lampa.Lang.translate("settings_player_subs") : null;
                 if (subsTitle && params && params.items && params.items.length) {
                     params.items = params.items.filter(function(it) {
                         return it.title !== subsTitle;
