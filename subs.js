@@ -4822,7 +4822,7 @@ var MatroskaSubtitles;
 
 (function() {
     "use strict";
-    var LIBASS_SUBS_VERSION = "1.1.2";
+    var LIBASS_SUBS_VERSION = "1.1.0";
     var DEBUG = false;
     try {
         DEBUG = localStorage.getItem("libass_debug") === "1";
@@ -5680,9 +5680,6 @@ var MatroskaSubtitles;
     var curTrack2 = -1;
     var subBox2 = null;
     var nativeSubs = [];
-    // subtitle tracks the player itself was given (Lampa's own list: external
-    // files a source attached, or tracks the video element exposes)
-    var lampaSubs = [];
     var manual = false;
     function trackLabel(td) {
         return "Track " + td.num + "  " + esc(td.lang || td.type) + "  (" + td.cues.length + ")";
@@ -5824,10 +5821,6 @@ var MatroskaSubtitles;
         if (nativeSubs.length) items.push({
             title: "Native subs (luna)…",
             native: true
-        });
-        if (lampaSubs.length) items.push({
-            title: "Player subtitles…",
-            lampa: true
         });
         items.push({
             title: "Settings",
@@ -5997,47 +5990,6 @@ var MatroskaSubtitles;
             items: items,
             onBack: back,
             onSelect: function(a) {
-                if (a.lampa) {
-                    // Lampa's own picker is what we replaced; offer its list here and
-                    // drive it the way Lampa does (mode + subsview), our overlay off
-                    Lampa.Select.show({
-                        title: "Player subtitles",
-                        items: lampaSubs.filter(function(s) {
-                            return s.index !== -1;
-                        }).map(function(s) {
-                            return {
-                                title: esc(s.language && s.label ? s.language + " / " + s.label : s.language || s.label || "Track"),
-                                ls: s
-                            };
-                        }),
-                        onBack: function() {
-                            showPicker(v);
-                        },
-                        onSelect: function(o) {
-                            try {
-                                curTrack = -1;
-                                if (subBox) {
-                                    subBox.innerHTML = "";
-                                    subBox.__last = "";
-                                }
-                                lampaSubs.forEach(function(s) {
-                                    s.mode = "disabled";
-                                    s.selected = false;
-                                });
-                                o.ls.mode = "showing";
-                                o.ls.selected = true;
-                                if (Lampa.PlayerPanel && Lampa.PlayerPanel.listener) Lampa.PlayerPanel.listener.send("subsview", {
-                                    status: true
-                                });
-                                hud("player sub: " + o.title);
-                            } catch (e) {
-                                hud("player sub err: " + e.message);
-                            }
-                            back();
-                        }
-                    });
-                    return;
-                }
                 if (a.native) {
                     Lampa.Select.show({
                         title: "Native subs",
@@ -6080,14 +6032,6 @@ var MatroskaSubtitles;
                     try {
                         localStorage.setItem(trackKey(), -1);
                     } catch (e) {}
-                    // a player subtitle picked from here goes off as well
-                    lampaSubs.forEach(function(s) {
-                        s.mode = "disabled";
-                        s.selected = false;
-                    });
-                    if (Lampa.PlayerPanel && Lampa.PlayerPanel.listener) Lampa.PlayerPanel.listener.send("subsview", {
-                        status: false
-                    });
                     hud("subs OFF");
                 } else {
                     hud("picked track " + a.num);
@@ -6604,9 +6548,7 @@ var MatroskaSubtitles;
     }
     var waited = false;
     function tick() {
-        // take the subs button only once the stream is readable (first range fetch
-        // succeeded); a host that refuses us keeps Lampa's own subtitle menu
-        if (streamUrl && fileSize) hookSubsButton();
+        if (streamUrl) hookSubsButton();
         var v = video();
         var src = v && (v.src || v.currentSrc);
         if (!v || !src) {
@@ -6625,13 +6567,9 @@ var MatroskaSubtitles;
         hud("video src: " + src);
         var same = src.indexOf(location.origin) === 0;
         var looksStream = /\/(ts|stream)\//i.test(src) || /link=/i.test(src);
-        // anything that is not adaptive (HLS/DASH) may be a container file — online
-        // sources hand out direct links, often signed and without an extension; the
-        // first range fetch decides, and a host that refuses leaves the player alone
-        var adaptive = /\.(m3u8|mpd)(\?|#|$)/i.test(src) || /^(blob|data):/i.test(src);
         var youtube = /youtube|googlevideo|\.m3u8.*yt/i.test(src);
         if (youtube) return hud("skip: youtube");
-        if (adaptive && !same && !looksStream) return hud("skip: adaptive stream");
+        if (!same && !looksStream) return hud("skip: not same-origin/stream URL (adjust filter)");
         extract(v, src);
     }
     function patch() {
@@ -6641,7 +6579,7 @@ var MatroskaSubtitles;
             var origShow = Lampa.Select.show;
             Lampa.Select.__libass = true;
             Lampa.Select.show = function(params) {
-                var subsTitle = streamUrl && fileSize && Lampa.Lang ? Lampa.Lang.translate("settings_player_subs") : null;
+                var subsTitle = streamUrl && Lampa.Lang ? Lampa.Lang.translate("settings_player_subs") : null;
                 if (subsTitle && params && params.items && params.items.length) {
                     params.items = params.items.filter(function(it) {
                         return it.title !== subsTitle;
@@ -6659,15 +6597,6 @@ var MatroskaSubtitles;
             Lampa.PlayerVideo.listener.follow("webos_subs", function(e) {
                 nativeSubs = e && e.subs || [];
                 hud("native subs: " + nativeSubs.length);
-            });
-            // the list arrives before the <video> gets its src, so it must outlive
-            // the per-src teardown; it is dropped with the player instead
-            Lampa.PlayerVideo.listener.follow("subs", function(e) {
-                lampaSubs = e && e.subs || [];
-                hud("player subs: " + lampaSubs.length);
-            });
-            if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow("destroy", function() {
-                lampaSubs = [];
             });
             Lampa.PlayerVideo.listener.follow("timeupdate", function(e) {
                 if (e && typeof e.current === "number") lastTime = e.current;
