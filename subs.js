@@ -4822,7 +4822,7 @@ var MatroskaSubtitles;
 
 (function() {
     "use strict";
-    var LIBASS_SUBS_VERSION = "1.1.0";
+    var LIBASS_SUBS_VERSION = "1.1.1";
     var DEBUG = false;
     try {
         DEBUG = localStorage.getItem("libass_debug") === "1";
