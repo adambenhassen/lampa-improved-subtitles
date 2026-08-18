@@ -5682,7 +5682,119 @@ var MatroskaSubtitles;
     var subBox2 = null;
     var nativeSubs = [];
     var manual = false;
+    // Subtitle files the player itself was given (Lampa's own list, e.g. external
+    // SRTs a source attached to the item). They live in `tracks` from EXT_BASE
+    // up, are fetched and rendered by us on pick, and their parsed cues are
+    // cached by URL so they survive the per-src teardown (quality switches).
+    var EXT_BASE = 1000;
+    var lampaSubs = [];
+    var extCues = {};
+    var extPicked = null;
+    var extPicked2 = null;
+    function extLabel(sub) {
+        return String(sub.label || sub.language || sub.title || "Subtitle");
+    }
+    function extTrackNum(url) {
+        for (var n in tracks) if (tracks[n].ext && tracks[n].url === url) return +n;
+        return -1;
+    }
+    function hasEmbedded() {
+        for (var n in tracks) if (!tracks[n].ext) return true;
+        return false;
+    }
+    function copyCues(num, cues) {
+        for (var i = 0; i < cues.length; i++) addCue(num, {
+            time: cues[i].time,
+            duration: cues[i].duration,
+            text: cues[i].text
+        });
+    }
+    function installExt() {
+        for (var i = 0; i < lampaSubs.length; i++) {
+            var sub = lampaSubs[i], num = EXT_BASE + i;
+            if (tracks[num]) continue;
+            tracks[num] = {
+                num: num,
+                type: "srt",
+                lang: extLabel(sub),
+                isAss: false,
+                header: FALLBACK_HEADER,
+                cues: [],
+                ext: true,
+                url: sub.url
+            };
+            if (extCues[sub.url]) copyCues(num, extCues[sub.url]);
+        }
+    }
+    function parseSrt(text) {
+        var out = [], re = /(\d+):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d+):(\d\d):(\d\d)[,.](\d{1,3})/;
+        var blocks = String(text).replace(/^\uFEFF/, "").split(/\r?\n\s*\r?\n/);
+        for (var b = 0; b < blocks.length; b++) {
+            var lines = blocks[b].split(/\r?\n/), i = 0;
+            while (i < lines.length && !re.test(lines[i])) i++;
+            if (i >= lines.length) continue;
+            var m = re.exec(lines[i]);
+            var st = (+m[1] * 3600 + +m[2] * 60 + +m[3]) * 1e3 + +(m[4] + "00").slice(0, 3);
+            var en = (+m[5] * 3600 + +m[6] * 60 + +m[7]) * 1e3 + +(m[8] + "00").slice(0, 3);
+            var txt = lines.slice(i + 1).join("\n").trim();
+            if (!txt) continue;
+            out.push({
+                time: st,
+                duration: Math.max(0, en - st),
+                text: txt
+            });
+        }
+        return out;
+    }
+    function loadExt(td, done) {
+        var url = td.url;
+        if (extCues[url]) {
+            if (done) done(true);
+            return;
+        }
+        hud("ext sub load: " + url.slice(0, 80));
+        var ac = newAborter();
+        var tm = ac ? setTimeout(function() {
+            ac.abort();
+        }, 45e3) : 0;
+        fetch(url, {
+            signal: ac && ac.signal
+        }).then(function(r) {
+            if (r.status !== 200) throw new Error("http " + r.status);
+            return r.text();
+        }).then(function(text) {
+            clearTimeout(tm);
+            var cues = parseSrt(text);
+            if (!cues.length) throw new Error("no cues");
+            extCues[url] = cues;
+            var num = extTrackNum(url);
+            if (num >= 0 && !tracks[num].cues.length) copyCues(num, cues);
+            hud("ext sub: " + cues.length + " cues");
+            if (done) done(true);
+        }).catch(function(e) {
+            clearTimeout(tm);
+            hud("ext sub err: " + (e && e.message));
+            if (window.Lampa && Lampa.Noty) Lampa.Noty.show("Subtitle failed to load");
+            if (done) done(false);
+        });
+    }
+    // after a per-src teardown, put the chosen external track back
+    function restoreExt() {
+        var num = extPicked ? extTrackNum(extPicked) : -1;
+        if (num >= 0) {
+            manual = true;
+            renderTrack(video(), num);
+            if (!extCues[extPicked]) loadExt(tracks[num]);
+        }
+        var num2 = extPicked2 ? extTrackNum(extPicked2) : -1;
+        if (num2 >= 0) {
+            curTrack2 = num2;
+            if (!extCues[extPicked2]) loadExt(tracks[num2]);
+            startTimeLoop();
+        }
+    }
     function trackLabel(td) {
+        if (td.ext) return esc(td.lang) + (td.cues.length ? "  (" + td.cues.length + ")" : "");
         return "Track " + td.num + "  " + esc(td.lang || td.type) + "  (" + td.cues.length + ")";
     }
     function renderTrack(v, num) {
@@ -5966,6 +6078,7 @@ var MatroskaSubtitles;
                     }
                     if (a.off) {
                         curTrack2 = -1;
+                        extPicked2 = null;
                         if (subBox2) {
                             subBox2.innerHTML = "";
                             subBox2.__last = "";
@@ -5976,7 +6089,8 @@ var MatroskaSubtitles;
                         hud("2nd subs OFF");
                     } else {
                         curTrack2 = a.num;
-                        try {
+                        extPicked2 = a.num >= EXT_BASE ? tracks[a.num].url : null;
+                        if (a.num >= EXT_BASE) loadExt(tracks[a.num]); else try {
                             localStorage.setItem(trackKey() + "_2", a.num);
                         } catch (e) {}
                         hud("2nd track " + a.num);
@@ -6026,6 +6140,7 @@ var MatroskaSubtitles;
                 manual = true;
                 if (a.off) {
                     curTrack = -1;
+                    extPicked = null;
                     if (subBox) {
                         subBox.innerHTML = "";
                         subBox.__last = "";
@@ -6034,7 +6149,13 @@ var MatroskaSubtitles;
                         localStorage.setItem(trackKey(), -1);
                     } catch (e) {}
                     hud("subs OFF");
+                } else if (a.num >= EXT_BASE) {
+                    hud("picked ext sub " + a.num);
+                    extPicked = tracks[a.num].url;
+                    renderTrack(v, a.num);
+                    loadExt(tracks[a.num]);
                 } else {
+                    extPicked = null;
                     hud("picked track " + a.num);
                     try {
                         localStorage.setItem(trackKey(), a.num);
@@ -6431,7 +6552,7 @@ var MatroskaSubtitles;
     // tracks; only then do we take over the subs button and Lampa's subtitle menu
     var haveTracks = false;
     function active() {
-        return !!(streamUrl && haveTracks);
+        return !!(streamUrl && haveTracks) || lampaSubs.length > 0;
     }
     function extract(v, url) {
         if (!window.MatroskaSubtitles) return hud("MISSING MatroskaSubtitles");
@@ -6492,7 +6613,7 @@ var MatroskaSubtitles;
             if (hdur > 0) duration = hdur;
             hud("dur(hdr)=" + hdur.toFixed(0) + " dur=" + duration.toFixed(0));
             parseHeaderTracks(headerBytes);
-            haveTracks = Object.keys(tracks).length > 0;
+            haveTracks = hasEmbedded();
             var cuesPos = parseSeekHead(hb);
             if (cuesPos >= 0) {
                 var cs = segBase + cuesPos, ce = Math.min(fileSize - 1, cs + 1048575);
@@ -6593,9 +6714,9 @@ var MatroskaSubtitles;
         // first range read decides, and a host that refuses leaves the player alone
         var adaptive = /\.(m3u8|mpd)(\?|#|$)/i.test(src) || /^(blob|data):/i.test(src);
         var youtube = /youtube|googlevideo|\.m3u8.*yt/i.test(src);
-        if (youtube) return hud("skip: youtube");
-        if (adaptive && !same && !looksStream) return hud("skip: adaptive stream");
-        extract(v, src);
+        if (youtube) hud("skip: youtube"); else if (adaptive && !same && !looksStream) hud("skip: adaptive stream"); else extract(v, src);
+        installExt();
+        restoreExt();
     }
     function patch() {
         if (!window.Lampa) return setTimeout(patch, 200);
@@ -6622,6 +6743,25 @@ var MatroskaSubtitles;
             Lampa.PlayerVideo.listener.follow("webos_subs", function(e) {
                 nativeSubs = e && e.subs || [];
                 hud("native subs: " + nativeSubs.length);
+            });
+            // the player's own subtitle list arrives with the item, before the
+            // <video> gets its src; it is dropped with the player, not per src
+            Lampa.PlayerVideo.listener.follow("subs", function(e) {
+                // the same event also carries the video's own text tracks (no url):
+                // keep the file list we already have in that case
+                var files = (e && e.subs || []).filter(function(s) {
+                    return s && typeof s.url === "string" && /^(https?:|blob:)/i.test(s.url);
+                });
+                if (!files.length) return;
+                lampaSubs = files;
+                hud("player subs: " + lampaSubs.length);
+                installExt();
+            });
+            if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow("destroy", function() {
+                lampaSubs = [];
+                extCues = {};
+                extPicked = null;
+                extPicked2 = null;
             });
             Lampa.PlayerVideo.listener.follow("timeupdate", function(e) {
                 if (e && typeof e.current === "number") lastTime = e.current;
