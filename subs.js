@@ -5722,7 +5722,8 @@ var MatroskaSubtitles;
                 header: FALLBACK_HEADER,
                 cues: [],
                 ext: true,
-                url: sub.url
+                url: sub.url,
+                text: typeof sub.text === "string" ? sub.text : null
             };
             if (extCues[sub.url]) copyCues(num, extCues[sub.url]);
         }
@@ -5754,6 +5755,17 @@ var MatroskaSubtitles;
             return;
         }
         if (extLoading[url]) return;
+        // a source may hand over the file body itself: no request needed
+        if (td.text !== null && td.text !== undefined) {
+            var own = parseSrt(td.text);
+            if (own.length) {
+                extCues[url] = own;
+                if (!td.cues.length) copyCues(td.num, own);
+                hud("ext sub (inline): " + own.length + " cues");
+                if (done) done(true);
+                return;
+            }
+        }
         extLoading[url] = true;
         if (window.Lampa && Lampa.Noty) Lampa.Noty.show("Loading subtitle…");
         hud("ext sub load: " + url.slice(0, 80));
@@ -6756,7 +6768,7 @@ var MatroskaSubtitles;
                 // the same event also carries the video's own text tracks (no url):
                 // keep the file list we already have in that case
                 var files = (e && e.subs || []).filter(function(s) {
-                    return s && typeof s.url === "string" && /^(https?:|blob:)/i.test(s.url);
+                    return s && typeof s.url === "string" && (/^(https?:|blob:)/i.test(s.url) || typeof s.text === "string");
                 });
                 if (!files.length) return;
                 lampaSubs = files;
