@@ -6763,12 +6763,16 @@ var MatroskaSubtitles;
                 hud("player subs: " + lampaSubs.length);
                 installExt();
             });
-            if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow("destroy", function() {
-                lampaSubs = [];
-                extCues = {};
-                extLoading = {};
-                extPicked = null;
-                extPicked2 = null;
+            // dropped when the player closes and when it starts another item
+            // (a title with no files sends no list, so the old one would linger)
+            if (Lampa.Player && Lampa.Player.listener) [ "start", "destroy" ].forEach(function(name) {
+                Lampa.Player.listener.follow(name, function() {
+                    lampaSubs = [];
+                    extCues = {};
+                    extLoading = {};
+                    extPicked = null;
+                    extPicked2 = null;
+                });
             });
             Lampa.PlayerVideo.listener.follow("timeupdate", function(e) {
                 if (e && typeof e.current === "number") lastTime = e.current;
