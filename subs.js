@@ -5689,6 +5689,7 @@ var MatroskaSubtitles;
     var EXT_BASE = 1000;
     var lampaSubs = [];
     var extCues = {};
+    var extLoading = {};
     var extPicked = null;
     var extPicked2 = null;
     function extLabel(sub) {
@@ -5752,6 +5753,9 @@ var MatroskaSubtitles;
             if (done) done(true);
             return;
         }
+        if (extLoading[url]) return;
+        extLoading[url] = true;
+        if (window.Lampa && Lampa.Noty) Lampa.Noty.show("Loading subtitle…");
         hud("ext sub load: " + url.slice(0, 80));
         var ac = newAborter();
         var tm = ac ? setTimeout(function() {
@@ -5764,6 +5768,7 @@ var MatroskaSubtitles;
             return r.text();
         }).then(function(text) {
             clearTimeout(tm);
+            delete extLoading[url];
             var cues = parseSrt(text);
             if (!cues.length) throw new Error("no cues");
             extCues[url] = cues;
@@ -5773,6 +5778,7 @@ var MatroskaSubtitles;
             if (done) done(true);
         }).catch(function(e) {
             clearTimeout(tm);
+            delete extLoading[url];
             hud("ext sub err: " + (e && e.message));
             if (window.Lampa && Lampa.Noty) Lampa.Noty.show("Subtitle failed to load");
             if (done) done(false);
@@ -5794,7 +5800,7 @@ var MatroskaSubtitles;
         }
     }
     function trackLabel(td) {
-        if (td.ext) return esc(td.lang) + (td.cues.length ? "  (" + td.cues.length + ")" : "");
+        if (td.ext) return esc(td.lang) + (td.cues.length ? "  (" + td.cues.length + ")" : extLoading[td.url] ? "  (loading…)" : "");
         return "Track " + td.num + "  " + esc(td.lang || td.type) + "  (" + td.cues.length + ")";
     }
     function renderTrack(v, num) {
@@ -6760,6 +6766,7 @@ var MatroskaSubtitles;
             if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow("destroy", function() {
                 lampaSubs = [];
                 extCues = {};
+                extLoading = {};
                 extPicked = null;
                 extPicked2 = null;
             });
