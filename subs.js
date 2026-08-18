@@ -5284,6 +5284,7 @@ var MatroskaSubtitles;
             found++;
             hud("mp4 trk " + trackId + " " + fmt + " " + (lang || "?") + " samples=" + nSamples);
         });
+        haveTracks = found > 0;
         if (!found) hud("mp4: no text subtitle tracks"); else hud("mp4 tracks: " + Object.keys(tracks).map(function(n) {
             return n + ":" + tracks[n].lang;
         }).join(","));
@@ -6062,8 +6063,17 @@ var MatroskaSubtitles;
         btn.classList.remove("hide");
         if (btn.__libass) return;
         btn.__libass = true;
-        $(btn).off("hover:enter").on("hover:enter", function() {
-            showPicker(video());
+        // The panel element lives for the whole session, so this hook outlives the
+        // stream. Keep Lampa's own handlers and hand the press back to them
+        // whenever we are not extracting: that is where a source's external
+        // subtitle list lives.
+        var events = $._data ? $._data(btn, "events") : null;
+        var original = (events && events["hover:enter"] || []).map(function(h) {
+            return h.handler;
+        });
+        $(btn).off("hover:enter").on("hover:enter", function(e) {
+            if (active()) return showPicker(video());
+            for (var i = 0; i < original.length; i++) original[i].call(btn, e);
         });
         hud("subs button hooked (open picker there)");
     }
@@ -6417,6 +6427,12 @@ var MatroskaSubtitles;
         fetchRegion(target);
     }
     var initFails = 0, lastInitSrc = null;
+    // true once the current stream turned out to be a container with text subtitle
+    // tracks; only then do we take over the subs button and Lampa's subtitle menu
+    var haveTracks = false;
+    function active() {
+        return !!(streamUrl && haveTracks);
+    }
     function extract(v, url) {
         if (!window.MatroskaSubtitles) return hud("MISSING MatroskaSubtitles");
         hud("extract start (seek mode)");
@@ -6425,6 +6441,7 @@ var MatroskaSubtitles;
             initFails = 0;
         }
         var g = gen;
+        haveTracks = false;
         tracks = {};
         curTrack = -1;
         curTrack2 = -1;
@@ -6475,6 +6492,7 @@ var MatroskaSubtitles;
             if (hdur > 0) duration = hdur;
             hud("dur(hdr)=" + hdur.toFixed(0) + " dur=" + duration.toFixed(0));
             parseHeaderTracks(headerBytes);
+            haveTracks = Object.keys(tracks).length > 0;
             var cuesPos = parseSeekHead(hb);
             if (cuesPos >= 0) {
                 var cs = segBase + cuesPos, ce = Math.min(fileSize - 1, cs + 1048575);
@@ -6529,6 +6547,7 @@ var MatroskaSubtitles;
         fetchedRegions = [];
         fetching = false;
         streamUrl = null;
+        haveTracks = false;
         segBase = 0;
         cueIndex = null;
         duration = 0;
@@ -6548,7 +6567,6 @@ var MatroskaSubtitles;
     }
     var waited = false;
     function tick() {
-        if (streamUrl) hookSubsButton();
         var v = video();
         var src = v && (v.src || v.currentSrc);
         if (!v || !src) {
@@ -6561,15 +6579,22 @@ var MatroskaSubtitles;
             }
             return;
         }
-        if (src === curSrc) return;
+        if (src === curSrc) {
+            if (active()) hookSubsButton();
+            return;
+        }
         stop();
         curSrc = src;
         hud("video src: " + src);
         var same = src.indexOf(location.origin) === 0;
         var looksStream = /\/(ts|stream)\//i.test(src) || /link=/i.test(src);
+        // anything that is not adaptive (HLS/DASH) may be a container file — online
+        // sources hand out direct links, often signed and without an extension; the
+        // first range read decides, and a host that refuses leaves the player alone
+        var adaptive = /\.(m3u8|mpd)(\?|#|$)/i.test(src) || /^(blob|data):/i.test(src);
         var youtube = /youtube|googlevideo|\.m3u8.*yt/i.test(src);
         if (youtube) return hud("skip: youtube");
-        if (!same && !looksStream) return hud("skip: not same-origin/stream URL (adjust filter)");
+        if (adaptive && !same && !looksStream) return hud("skip: adaptive stream");
         extract(v, src);
     }
     function patch() {
@@ -6579,7 +6604,7 @@ var MatroskaSubtitles;
             var origShow = Lampa.Select.show;
             Lampa.Select.__libass = true;
             Lampa.Select.show = function(params) {
-                var subsTitle = streamUrl && Lampa.Lang ? Lampa.Lang.translate("settings_player_subs") : null;
+                var subsTitle = active() && Lampa.Lang ? Lampa.Lang.translate("settings_player_subs") : null;
                 if (subsTitle && params && params.items && params.items.length) {
                     params.items = params.items.filter(function(it) {
                         return it.title !== subsTitle;
